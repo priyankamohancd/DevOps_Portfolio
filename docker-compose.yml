@@ -1,0 +1,22 @@
+# docker-compose.yml
+# Used by the pipeline's "deploy" stage to run the container locally.
+# Demonstrates Infrastructure-as-Code: deployment defined as a file in git.
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cicd-demo:latest
+    container_name: cicd-demo-app
+    ports:
+      - "5000:5000"
+    environment:
+      APP_VERSION: "${APP_VERSION:-1.0.0}"
+      APP_ENV: "local"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
