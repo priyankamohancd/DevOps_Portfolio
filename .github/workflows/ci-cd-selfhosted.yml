@@ -1,0 +1,120 @@
+# .github/workflows/ci-cd-selfhosted.yml
+#
+# Single-job pipeline. All 5 stages live as sequential steps inside one job
+# on a self-hosted runner. Simpler than splitting into jobs because:
+#   - One checkout, one environment, one set of deps
+#   - The built image flows naturally into scan and deploy
+#   - Easier to read top-to-bottom (great for teaching)
+#
+# Pre-reqs on the runner machine:
+#   - Docker installed and running
+#   - Python 3.12+ and pip
+#   - Git
+#   - Runner registered with label `local-deploy`
+
+name: CI/CD Pipeline (Self-Hosted, Single Job)
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      app_version:
+        description: "Version label baked into the running container"
+        required: false
+        default: "manual-run"
+        type: string
+
+env:
+  IMAGE_NAME: cicd-demo
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  ci-cd:
+    name: Build, Test, and Deploy
+    runs-on: [self-hosted, local-deploy]
+
+    steps:
+      # ---------- CHECKOUT ----------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ---------- STAGE 1: LINT ----------
+      - name: Install lint tools
+        run: pip install --user flake8
+
+      - name: Lint code (flake8)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          flake8 app/ --max-line-length=100 --exclude=__pycache__
+
+      # ---------- STAGE 2: TEST ----------
+      - name: Install Python dependencies
+        run: pip install --user -r app/requirements.txt
+
+      - name: Run unit tests (pytest)
+        working-directory: ./app
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          pytest -v --tb=short
+
+      # ---------- STAGE 3: BUILD ----------
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+            --tag ${{ env.IMAGE_NAME }}:latest \
+            .
+
+      - name: Show image details
+        run: docker images ${{ env.IMAGE_NAME }}
+
+      # ---------- STAGE 4: SCAN ----------
+      - name: Scan image for vulnerabilities (Trivy)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL,HIGH \
+            --exit-code 0 \
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+      # ---------- STAGE 5: DEPLOY ----------
+      - name: Stop previous container (if running)
+        run: docker rm -f cicd-demo-app || true
+
+      - name: Run new container
+        run: |
+          docker run -d \
+            --name cicd-demo-app \
+            -p 5000:5000 \
+            -e APP_VERSION="${{ inputs.app_version || github.sha }}" \
+            -e APP_ENV="local" \
+            --restart unless-stopped \
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Smoke test deployment
+        run: |
+          sleep 5
+          curl --fail http://localhost:5000/health
+          echo ""
+          echo "App response:"
+          curl -s http://localhost:5000/
+
+      - name: Show running containers
+        run: docker ps --filter "name=cicd-demo-app"
+
+      # ---------- SUMMARY ----------
+      - name: Pipeline summary
+        run: |
+          echo "## Pipeline complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| App URL | http://localhost:5000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ inputs.app_version || github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
